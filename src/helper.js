@@ -566,9 +566,13 @@ const createGlobalTableV2 = async function createGlobalTableV2(
       // console.log(resp)
       status = resp.Table.TableStatus;
       // console.log(status)
-      await sleep(200);
+      await sleep(50);
     }
-
+    cli.consoleLog(
+      `CreateGlobalTable: ${chalk.yellow(
+        `Wait for ${tableName} replication available...`
+      )}`
+    );
     await dynamodb.waitFor('tableExists', { TableName: tableName }).promise(); // it's gonna wait for "Active" status
     cli.consoleLog(
       `CreateGlobalTable: ${chalk.yellow(
@@ -741,7 +745,7 @@ const createGlobalDynamodbTable = async function createGlobalDynamodbTable(
           cli
         );
       });
-      Promise.all(promises);
+      await Promise.all(promises);
 
       // for (let tableName of tableNames) {
       //   await module.exports.createGlobalTable(
@@ -766,6 +770,140 @@ const createGlobalDynamodbTable = async function createGlobalDynamodbTable(
   }
 };
 
+const deleteGlobalTable = async function deleteGlobalTable(serverless) {
+  try {
+    serverless.cli.consoleLog(
+      `DeleteGlobalTable: ${chalk.yellow('Starting deleting global tables...')}`
+    );
+
+    const provider = serverless.getProvider('aws');
+    const awsCredentials = provider.getCredentials();
+    const region = provider.getRegion();
+    const serviceName = serverless.service.getServiceName();
+    const stage = provider.getStage();
+    const stackName =
+      serverless.service.provider.stackName || `${serviceName}-${stage}`;
+    const cli = serverless.cli;
+
+    const globalTablesOptions = get(serverless, 'service.custom.globalTables');
+    if (!globalTablesOptions || Object.keys(globalTablesOptions).length === 0) {
+      cli.consoleLog(
+        `DeleteGlobalTable: ${chalk.yellow(
+          'Global Table configuration missing, skipping creation...'
+        )}`
+      );
+      return;
+    }
+
+    const cfn = new AWS.CloudFormation({
+      credentials: awsCredentials.credentials,
+      region,
+    });
+
+    const dynamodb = new AWS.DynamoDB({
+      credentials: awsCredentials.credentials,
+      region,
+    });
+
+    const tableNames = await module.exports.getTableNamesFromStack(
+      cfn,
+      stackName
+    );
+    if (!tableNames.length) {
+      cli.consoleLog(
+        `DeleteGlobalTable: ${chalk.yellow(
+          'No table has been created as part of this stack. Skipping global table setup.'
+        )}`
+      );
+      return;
+    }
+
+    const promises = tableNames.map(async (tableName) => {
+      for (let regionToDelete of globalTablesOptions.regions) {
+        try {
+          const params = {
+            TableName: tableName,
+            ReplicaUpdates: [{ Delete: { RegionName: regionToDelete } }],
+          };
+
+          cli.consoleLog(
+            `DeleteGlobalTable: ${chalk.yellow(
+              `Start deleting a replica for ${tableName} in ${regionToDelete}`
+            )}`
+          );
+
+          const res = await dynamodb.updateTable(params).promise();
+          // console.log('update-table delete replica result:', res);
+
+          let status = 'ACTIVE';
+          while (status === 'ACTIVE') {
+            cli.consoleLog(
+              `${chalk.yellow(`Wait for ${tableName} in ${region} to update`)}`
+            );
+            // console.log(status)
+            let resp = await dynamodb
+              .describeTable({ TableName: tableName })
+              .promise();
+            // console.log(resp)
+            status = resp.Table.TableStatus;
+            // console.log(status)
+            await sleep(50);
+          }
+
+          cli.consoleLog(
+            `DeleteGlobalTable: ${chalk.yellow(
+              `Wait for ${tableName} replication available...`
+            )}`
+          );
+
+          await dynamodb
+            .waitFor('tableExists', { TableName: tableName })
+            .promise(); // it's gonna wait for "Active" status
+
+          cli.consoleLog(
+            `DeleteGlobalTable: ${chalk.yellow(
+              `Deleting stack ${stackName}...`
+            )}`
+          );
+
+          try {
+            const cfnToDelete = new AWS.CloudFormation({
+              credentials: awsCredentials.credentials,
+              region: regionToDelete,
+            });
+
+            var deleteStackParams = {
+              StackName: stackName,
+            };
+            // console.log(params)
+            await cfnToDelete.deleteStack(deleteStackParams).promise();
+          } catch (err) {
+            console.log(err);
+            cli.consoleLog(
+              `DeleteGlobalTable: ${chalk.yellow(
+                `Failed to delete stack ${stackName}...`
+              )}`
+            );
+          }
+        } catch (error) {
+          serverless.cli.consoleLog(
+            `DeleteGlobalTable: ${chalk.red(
+              `Failed to delete global table. Error ${error.message || error}`
+            )}`
+          );
+        }
+      }
+    });
+    await Promise.all(promises);
+  } catch (error) {
+    serverless.cli.consoleLog(
+      `deleteGlobalTable: ${chalk.red(
+        `Failed to delete  global table. Error ${error.message || error}`
+      )}`
+    );
+  }
+};
+
 module.exports = {
   checkStackCreateUpdateStatus,
   createGlobalDynamodbTable,
@@ -777,4 +915,5 @@ module.exports = {
   getRegionsToCreateGlobalTablesIn,
   getTableNamesFromStack,
   sleep,
+  deleteGlobalTable,
 };
